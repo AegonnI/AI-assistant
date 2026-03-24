@@ -110,11 +110,11 @@ with st.sidebar:
 
     st.session_state.coeff_source = st.selectbox(
         "Источник коэффициентов",
-        ["Локальный пайплайн", "Через API (extract_coeffs)"],
+        ["Локальный пайплайн", "Через API"],
         index=0 if st.session_state.coeff_source == "Локальный пайплайн" else 1,
     )
 
-    if st.session_state.coeff_source == "Через API (extract_coeffs)":
+    if st.session_state.coeff_source == "Через API":
         st.markdown("### 🔑 Настройки API")
         st.session_state.model_family = st.selectbox(
             "Провайдер",
