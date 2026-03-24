@@ -1,5 +1,6 @@
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 import json
+import re
 
 def run_groq(prompt, key, model_name = "qwen/qwen3-32b"):
     from groq import Groq
@@ -84,13 +85,13 @@ def run_openrouter(prompt, key, model_name = "mistralai/mixtral-8x7b-instruct"):
     except Exception as e:
         print(f"⚠️ Exception: {e}")
 
-def api_request(prompt, key, model_family, model_name):
+def api_request(prompt: str, api_key: str, model_family: str, model_name: str) -> str:
     if model_family == "Groq":
-        return run_groq(prompt, key, model_name)
+        return run_groq(prompt, api_key, model_name)
     if model_family == "google":
-        return run_google(prompt, key, model_name)
+        return run_google(prompt, api_key, model_name)
     if model_family == 'openrouter':
-        return run_openrouter(prompt, key, model_name)
+        return run_openrouter(prompt, api_key, model_name)
     
 def load_text(file_path: str) -> str:
     ext = file_path.lower().split(".")[-1]

@@ -1,9 +1,13 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import tempfile
+from datetime import datetime
 # Добавьте эту строку в начало файла, где остальные импорты
 from recommendation_module.recommendation_module import get_recommendation
 from financial_pipeline import run_pipeline_on_uploaded_pdf, format_metrics_for_llm_prompt
+from financial_pipeline.financial_parser import extract_lines_from_pdf
+from api_ai.ModelProvider import extract_coeffs
 
 # Настройка страницы
 st.set_page_config(
@@ -23,6 +27,27 @@ if 'recommendations' not in st.session_state:
     st.session_state.recommendations = None
 if 'report_generated' not in st.session_state:
     st.session_state.report_generated = False
+if "api_key" not in st.session_state:
+    st.session_state.api_key = ""
+if "model_family" not in st.session_state:
+    st.session_state.model_family = "Groq"
+if "model_name" not in st.session_state:
+    st.session_state.model_name = "qwen/qwen3-32b"
+if "coeff_source" not in st.session_state:
+    st.session_state.coeff_source = "Локальный пайплайн"
+if "coeff_list_text" not in st.session_state:
+    st.session_state.coeff_list_text = "Выручка, Чистая прибыль, Активы, Собственный капитал"
+
+
+def _pdf_bytes_to_text(file_bytes: bytes) -> str:
+    # Берем текст построчно и склеиваем обратно — для промпта LLM
+    lines = extract_lines_from_pdf(file_bytes)
+    return "\n".join(lines)
+
+
+def _parse_coeff_list(text: str) -> list[str]:
+    items = [x.strip() for x in (text or "").split(",")]
+    return [x for x in items if x]
 
 # Боковая панель для импорта документов и запуска модулей
 with st.sidebar:
@@ -54,6 +79,45 @@ with st.sidebar:
     
     # Анализ данных - единая кнопка запуска всех модулей
     st.title("🚀 Анализ данных")
+
+    st.session_state.coeff_source = st.selectbox(
+        "Источник коэффициентов",
+        ["Локальный пайплайн", "Через API (extract_coeffs)"],
+        index=0 if st.session_state.coeff_source == "Локальный пайплайн" else 1,
+    )
+
+    if st.session_state.coeff_source == "Через API (extract_coeffs)":
+        st.markdown("### 🔑 Настройки API")
+        st.session_state.model_family = st.selectbox(
+            "Провайдер",
+            ["Groq", "google", "openrouter"],
+            index=["Groq", "google", "openrouter"].index(st.session_state.model_family),
+        )
+
+        default_models = {
+            "Groq": "qwen/qwen3-32b",
+            "google": "gemini-2.5-flash",
+            "openrouter": "mistralai/mixtral-8x7b-instruct",
+        }
+
+        st.session_state.model_name = st.text_input(
+            "Модель",
+            value=st.session_state.model_name or default_models[st.session_state.model_family],
+            help="Можно оставить по умолчанию или заменить на вашу модель.",
+        )
+
+        st.session_state.api_key = st.text_input(
+            "API key",
+            value=st.session_state.api_key,
+            type="password",
+            help="Ваш ключ для выбранного провайдера.",
+        )
+
+        st.session_state.coeff_list_text = st.text_input(
+            "Коэффициенты/показатели (через запятую)",
+            value=st.session_state.coeff_list_text,
+            help="Список имен коэффициентов, которые нужно извлечь из PDF.",
+        )
     
     # Кнопка запуска всех модулей сразу
     if st.button("🔍 Запустить анализ", use_container_width=True, type="primary"):
@@ -61,42 +125,72 @@ with st.sidebar:
             with st.spinner("Запуск модулей анализа..."):
                 st.session_state.processing_started = True
 
-                # Модуль 1: Расчет коэффициентов через financial_pipeline
-                try:
-                    primary_file = st.session_state.documents[0]
-                    file_bytes = primary_file.getvalue()
-                    st.session_state.coefficients_data = run_pipeline_on_uploaded_pdf(
-                        file_bytes=file_bytes,
-                        file_name=primary_file.name,
-                    )
-                except Exception as e:
-                    st.session_state.coefficients_data = None
-                    st.session_state.recommendations = f"Ошибка расчета коэффициентов: {str(e)}"
-                    st.session_state.report_generated = False
-                    st.error("❌ Ошибка при обработке PDF. Проверьте формат документа.")
-                    st.stop()
+                primary_file = st.session_state.documents[0]
+                file_bytes = primary_file.getvalue()
 
-                # Модуль 2: Генерация рекомендаций через Ollama
-                try:
-                    coeffs = st.session_state.coefficients_data.get('coefficients', {})
-                    metrics_prompt = format_metrics_for_llm_prompt(
-                        st.session_state.coefficients_data.get('metrics_detailed', [])
-                    )
-                    prompt = f"""
-                    На основе следующих финансовых коэффициентов компании:
-                    {metrics_prompt if metrics_prompt else "Недостаточно данных для детального списка метрик."}
+                # 1) Коэффициенты: локально или через API
+                if st.session_state.coeff_source == "Через API (extract_coeffs)":
+                    coeff_list = _parse_coeff_list(st.session_state.coeff_list_text)
+                    if not coeff_list:
+                        st.error("⚠️ Укажите хотя бы один коэффициент/показатель для извлечения.")
+                        st.stop()
+                    if not st.session_state.api_key:
+                        st.error("⚠️ Введите API key для выбранного провайдера.")
+                        st.stop()
 
-                    Дай 3-4 конкретные рекомендации по улучшению финансового состояния компании.
-                    Для каждой рекомендации укажи: параметр, саму рекомендацию и ожидаемый эффект.
-                    Учти, что числовые коэффициенты в процентах уже приведены в %:
-                    {coeffs}
-                    """
+                    try:
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                            tmp.write(file_bytes)
+                            tmp_path = tmp.name
+
+                        extracted = extract_coeffs(
+                            api_key=st.session_state.api_key,
+                            model_family=st.session_state.model_family,
+                            model_name=st.session_state.model_name,
+                            file_path=tmp_path,
+                            coefficients=coeff_list,
+                            chunk_size=6000,
+                        )
+
+                        st.session_state.coefficients_data = {
+                            "file_name": primary_file.name,
+                            "date": datetime.now().strftime("%Y-%m-%d"),
+                            "coefficients": extracted,
+                            "warnings": [],
+                            "metrics_detailed": [],
+                            "facts": {},
+                            "parse_meta": {},
+                        }
+                    except Exception as e:
+                        st.session_state.coefficients_data = None
+                        st.session_state.recommendations = f"Ошибка extract_coeffs: {str(e)}"
+                        st.session_state.report_generated = False
+                        st.error("❌ Ошибка при извлечении коэффициентов через API.")
+                        st.stop()
+                else:
+                    # Локальный pipeline (financial_pipeline)
+                    try:
+                        st.session_state.coefficients_data = run_pipeline_on_uploaded_pdf(
+                            file_bytes=file_bytes,
+                            file_name=primary_file.name,
+                        )
+                    except Exception as e:
+                        st.session_state.coefficients_data = None
+                        st.session_state.recommendations = f"Ошибка расчета коэффициентов: {str(e)}"
+                        st.session_state.report_generated = False
+                        st.error("❌ Ошибка при обработке PDF. Проверьте формат документа.")
+                        st.stop()
+
+                # 2) Рекомендации через Ollama (строго: модель qwen3.5:9b, промпт = текст PDF)
+                try:
+                    pdf_text = _pdf_bytes_to_text(file_bytes)
+                    prompt = pdf_text
                     
                     # Получаем рекомендации от Ollama
                     recommendation_text = get_recommendation(
-                        model_name="llama3.2",  # или другая модель, которая у вас есть
+                        model_name="qwen3.5:9b",
                         prompt=prompt,
-                        system_prompt="Ты профессиональный финансовый аналитик. Даешь конкретные, практические рекомендации.",
+                        system_prompt="Ты профессиональный финансовый аналитик. Дай краткие и практические рекомендации по улучшению финансового состояния компании на основе данных из документа.",
                         temperature=0.3
                     )
                     
