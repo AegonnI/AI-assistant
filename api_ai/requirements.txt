@@ -1,0 +1,6 @@
+﻿requests
+json
+typing
+re
+groq
+google
