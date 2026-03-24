@@ -7,9 +7,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, List
 
-from coefficients_module import MetricResult, compute_metrics, metrics_to_coefficients_dict
-from financial_parser import parse_financial_pdf
-from financial_transform import collect_warnings, raw_dict_to_facts
+from .coefficients_module import MetricResult, compute_metrics, metrics_to_coefficients_dict
+from .financial_parser import parse_financial_pdf
+from .financial_transform import collect_warnings, raw_dict_to_facts
 
 
 def _serialize_metric(m: MetricResult) -> Dict[str, Any]:

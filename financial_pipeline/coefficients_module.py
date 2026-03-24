@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, List, Optional
 
-from financial_transform import FinancialFacts
+from .financial_transform import FinancialFacts
 
 
 class MetricStatus(str, Enum):

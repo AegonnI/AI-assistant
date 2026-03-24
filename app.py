@@ -1,10 +1,9 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-from datetime import datetime
-import requests
 # Добавьте эту строку в начало файла, где остальные импорты
-from recommendation_module import get_recommendation
+from recommendation_module.recommendation_module import get_recommendation
+from financial_pipeline import run_pipeline_on_uploaded_pdf, format_metrics_for_llm_prompt
 
 # Настройка страницы
 st.set_page_config(
@@ -60,35 +59,37 @@ with st.sidebar:
     if st.button("🔍 Запустить анализ", use_container_width=True, type="primary"):
         if st.session_state.documents:
             with st.spinner("Запуск модулей анализа..."):
-                # Имитация работы модулей
                 st.session_state.processing_started = True
-                
-                # Модуль 1: Подсчет коэффициентов (имитация)
-                st.session_state.coefficients_data = {
-                    'file_name': uploaded_files[0].name if uploaded_files else "document.pdf",
-                    'date': datetime.now().strftime("%Y-%m-%d"),
-                    'coefficients': {
-                        'Коэффициент ликвидности': 2.5,
-                        'Коэффициент рентабельности': 0.15,
-                        'Коэффициент автономии': 0.6,
-                        'Коэффициент оборачиваемости': 4.2
-                    }
-                }
-                
+
+                # Модуль 1: Расчет коэффициентов через financial_pipeline
+                try:
+                    primary_file = st.session_state.documents[0]
+                    file_bytes = primary_file.getvalue()
+                    st.session_state.coefficients_data = run_pipeline_on_uploaded_pdf(
+                        file_bytes=file_bytes,
+                        file_name=primary_file.name,
+                    )
+                except Exception as e:
+                    st.session_state.coefficients_data = None
+                    st.session_state.recommendations = f"Ошибка расчета коэффициентов: {str(e)}"
+                    st.session_state.report_generated = False
+                    st.error("❌ Ошибка при обработке PDF. Проверьте формат документа.")
+                    st.stop()
+
                 # Модуль 2: Генерация рекомендаций через Ollama
                 try:
-                    # Формируем промпт на основе коэффициентов
-                    coeffs = st.session_state.coefficients_data['coefficients']
+                    coeffs = st.session_state.coefficients_data.get('coefficients', {})
+                    metrics_prompt = format_metrics_for_llm_prompt(
+                        st.session_state.coefficients_data.get('metrics_detailed', [])
+                    )
                     prompt = f"""
                     На основе следующих финансовых коэффициентов компании:
-                    - Коэффициент ликвидности: {coeffs.get('Коэффициент ликвидности', 'N/A')}
-                    - Коэффициент рентабельности: {coeffs.get('Коэффициент рентабельности', 'N/A')}
-                    - Коэффициент автономии: {coeffs.get('Коэффициент автономии', 'N/A')}
-                    - Коэффициент оборачиваемости: {coeffs.get('Коэффициент оборачиваемости', 'N/A')}
-                    
+                    {metrics_prompt if metrics_prompt else "Недостаточно данных для детального списка метрик."}
+
                     Дай 3-4 конкретные рекомендации по улучшению финансового состояния компании.
                     Для каждой рекомендации укажи: параметр, саму рекомендацию и ожидаемый эффект.
-                    Ответ представь в структурированном виде.
+                    Учти, что числовые коэффициенты в процентах уже приведены в %:
+                    {coeffs}
                     """
                     
                     # Получаем рекомендации от Ollama
@@ -170,6 +171,12 @@ with tab1:
         
         df_coeff = pd.DataFrame(coeff_data)
         st.dataframe(df_coeff, use_container_width=True)
+
+        warnings = st.session_state.coefficients_data.get("warnings", [])
+        if warnings:
+            st.warning("⚠️ Обнаружены неполные данные в документе:")
+            for w in warnings:
+                st.markdown(f"- {w}")
         
         # Визуализация коэффициентов
         fig = px.bar(
@@ -249,8 +256,11 @@ with tab3:
                 
                 if include_recommendations and st.session_state.recommendations:
                     st.markdown("#### Рекомендации")
-                    for rec in st.session_state.recommendations:
-                        st.markdown(f"- {rec['рекомендация']}")
+                    if isinstance(st.session_state.recommendations, str):
+                        st.markdown(st.session_state.recommendations)
+                    else:
+                        for rec in st.session_state.recommendations:
+                            st.markdown(f"- {rec['рекомендация']}")
     elif st.session_state.documents and not st.session_state.processing_started:
         st.info("ℹ️ Нажмите кнопку 'Запустить анализ' в боковой панели для формирования отчета")
     elif not st.session_state.documents:
