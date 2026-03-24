@@ -17,7 +17,7 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
-from coefficients_module import MetricResult, MetricStatus, status_emoji
+from financial_pipeline.coefficients_module import MetricResult, MetricStatus, status_emoji
 
 
 def _register_cyrillic_font() -> str:

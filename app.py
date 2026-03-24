@@ -2,12 +2,15 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import tempfile
+import io
 from datetime import datetime
-# Добавьте эту строку в начало файла, где остальные импорты
+from pathlib import Path
 from recommendation_module.recommendation_module import get_recommendation
-from financial_pipeline import run_pipeline_on_uploaded_pdf, format_metrics_for_llm_prompt
-from financial_pipeline.financial_parser import extract_lines_from_pdf
+from financial_pipeline import run_pipeline_on_uploaded_pdf
 from api_ai.ModelProvider import extract_coeffs
+from pdf_parser_module.main_pdf_parser1 import extract_pdf_simple
+from report_pdf import build_pdf_from_session_payload
+from financial_pipeline.coefficients_module import status_emoji
 
 # Настройка страницы
 st.set_page_config(
@@ -37,17 +40,42 @@ if "coeff_source" not in st.session_state:
     st.session_state.coeff_source = "Локальный пайплайн"
 if "coeff_list_text" not in st.session_state:
     st.session_state.coeff_list_text = "Выручка, Чистая прибыль, Активы, Собственный капитал"
+if "metrics_ready" not in st.session_state:
+    st.session_state.metrics_ready = False
+if "run_coeffs_metrics" not in st.session_state:
+    st.session_state.run_coeffs_metrics = False
+if "run_recommendations" not in st.session_state:
+    st.session_state.run_recommendations = False
+if "run_report" not in st.session_state:
+    st.session_state.run_report = False
 
 
-def _pdf_bytes_to_text(file_bytes: bytes) -> str:
-    # Берем текст построчно и склеиваем обратно — для промпта LLM
-    lines = extract_lines_from_pdf(file_bytes)
-    return "\n".join(lines)
+def _save_uploaded_pdf_to_temp(file_name: str, file_bytes: bytes) -> tuple[str, str]:
+    base_dir = Path(tempfile.gettempdir()) / "ai_assistant_streamlit"
+    input_dir = base_dir / "input"
+    output_dir = base_dir / "output"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    safe_name = Path(file_name).name
+    input_path = input_dir / safe_name
+    input_path.write_bytes(file_bytes)
+    return str(input_path), str(output_dir)
 
 
 def _parse_coeff_list(text: str) -> list[str]:
     items = [x.strip() for x in (text or "").split(",")]
     return [x for x in items if x]
+
+
+def _build_pdf_artifacts(uploaded_file) -> tuple[bytes, dict, str]:
+    file_bytes = uploaded_file.getvalue()
+    input_pdf_path, output_dir = _save_uploaded_pdf_to_temp(uploaded_file.name, file_bytes)
+    parser_result = extract_pdf_simple(input_path=input_pdf_path, output_dir=output_dir)
+    if not parser_result.get("success"):
+        raise RuntimeError(parser_result.get("error") or "Ошибка парсинга PDF")
+    json_str = str(parser_result.get("json_file", ""))
+    return file_bytes, parser_result, json_str
 
 # Боковая панель для импорта документов и запуска модулей
 with st.sidebar:
@@ -77,7 +105,7 @@ with st.sidebar:
     
     st.divider()
     
-    # Анализ данных - единая кнопка запуска всех модулей
+    # Анализ данных 
     st.title("🚀 Анализ данных")
 
     st.session_state.coeff_source = st.selectbox(
@@ -119,116 +147,92 @@ with st.sidebar:
             help="Список имен коэффициентов, которые нужно извлечь из PDF.",
         )
     
-    # Кнопка запуска всех модулей сразу
-    if st.button("🔍 Запустить анализ", use_container_width=True, type="primary"):
-        if st.session_state.documents:
-            with st.spinner("Запуск модулей анализа..."):
-                st.session_state.processing_started = True
+    st.markdown("### Запуск модулей")
+    st.session_state.run_coeffs_metrics = st.checkbox(
+        "Вытаскивание коэфов и подсчет метрик", value=st.session_state.run_coeffs_metrics
+    )
+    st.session_state.run_recommendations = st.checkbox(
+        "Выдача рекомендаций", value=st.session_state.run_recommendations
+    )
+    st.session_state.run_report = st.checkbox(
+        "Генерация отчета", value=st.session_state.run_report
+    )
 
-                primary_file = st.session_state.documents[0]
-                file_bytes = primary_file.getvalue()
+    if st.button("▶️ Запустить отмеченные", use_container_width=True, type="primary"):
+        if not st.session_state.documents:
+            st.warning("⚠️ Сначала загрузите PDF документы")
+            st.stop()
 
-                # 1) Коэффициенты: локально или через API
-                if st.session_state.coeff_source == "Через API (extract_coeffs)":
-                    coeff_list = _parse_coeff_list(st.session_state.coeff_list_text)
-                    if not coeff_list:
-                        st.error("⚠️ Укажите хотя бы один коэффициент/показатель для извлечения.")
-                        st.stop()
-                    if not st.session_state.api_key:
-                        st.error("⚠️ Введите API key для выбранного провайдера.")
-                        st.stop()
+        primary_file = st.session_state.documents[0]
+        st.session_state.processing_started = True
 
-                    try:
-                        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                            tmp.write(file_bytes)
-                            tmp_path = tmp.name
-
-                        extracted = extract_coeffs(
+        if st.session_state.run_coeffs_metrics and not st.session_state.metrics_ready:
+            with st.spinner("Извлекаем коэффициенты..."):
+                try:
+                    file_bytes, _parser_result, json_str = _build_pdf_artifacts(primary_file)
+                    if st.session_state.coeff_source == "Через API (extract_coeffs)":
+                        coeff_list = _parse_coeff_list(st.session_state.coeff_list_text)
+                        if not coeff_list:
+                            st.error("⚠️ Укажите хотя бы один коэффициент/показатель для извлечения.")
+                            st.stop()
+                        if not st.session_state.api_key:
+                            st.error("⚠️ Введите API key для выбранного провайдера.")
+                            st.stop()
+                        coeffs = extract_coeffs(
                             api_key=st.session_state.api_key,
                             model_family=st.session_state.model_family,
                             model_name=st.session_state.model_name,
-                            file_path=tmp_path,
+                            file_path=json_str,
                             coefficients=coeff_list,
                             chunk_size=6000,
                         )
-
                         st.session_state.coefficients_data = {
                             "file_name": primary_file.name,
                             "date": datetime.now().strftime("%Y-%m-%d"),
-                            "coefficients": extracted,
+                            "coefficients": coeffs,
                             "warnings": [],
                             "metrics_detailed": [],
                             "facts": {},
                             "parse_meta": {},
                         }
-                    except Exception as e:
-                        st.session_state.coefficients_data = None
-                        st.session_state.recommendations = f"Ошибка extract_coeffs: {str(e)}"
-                        st.session_state.report_generated = False
-                        st.error("❌ Ошибка при извлечении коэффициентов через API.")
-                        st.stop()
-                else:
-                    # Локальный pipeline (financial_pipeline)
-                    try:
+                    else:
                         st.session_state.coefficients_data = run_pipeline_on_uploaded_pdf(
                             file_bytes=file_bytes,
                             file_name=primary_file.name,
                         )
-                    except Exception as e:
-                        st.session_state.coefficients_data = None
-                        st.session_state.recommendations = f"Ошибка расчета коэффициентов: {str(e)}"
-                        st.session_state.report_generated = False
-                        st.error("❌ Ошибка при обработке PDF. Проверьте формат документа.")
-                        st.stop()
-
-                # 2) Рекомендации через Ollama (строго: модель qwen3.5:9b, промпт = текст PDF)
-                try:
-                    pdf_text = _pdf_bytes_to_text(file_bytes)
-                    prompt = pdf_text
-                    
-                    # Получаем рекомендации от Ollama
-                    recommendation_text = get_recommendation(
-                        model_name="qwen3.5:9b",
-                        prompt=prompt,
-                        system_prompt="Ты профессиональный финансовый аналитик. Дай краткие и практические рекомендации по улучшению финансового состояния компании на основе данных из документа.",
-                        temperature=0.3
-                    )
-                    
-                    # Сохраняем в сессию
-                    st.session_state.recommendations = recommendation_text
-                    
+                    st.session_state.metrics_ready = True
+                    st.success("✅ Коэффициенты извлечены и метрики посчитаны")
                 except Exception as e:
-                    st.session_state.recommendations = f"Ошибка получения рекомендаций: {str(e)}"
-                
-                # Модуль 3: Генерация отчета (имитация)
-                st.session_state.report_generated = True
-                
-                st.success("✅ Анализ завершен! Все модули выполнены.")
-        else:
-            st.warning("⚠️ Сначала загрузите PDF документы")
-    
-    # Информация о статусе выполнения модулей
-    if st.session_state.processing_started:
-        st.divider()
-        st.markdown("### 📊 Статус модулей")
-        
-        # Статус для коэффициентов
-        if st.session_state.coefficients_data:
-            st.success("✅ Коэффициенты: готово")
-        else:
-            st.info("⏳ Коэффициенты: ожидание")
-        
-        # Статус для рекомендаций
-        if st.session_state.recommendations:
-            st.success("✅ Рекомендации: готово")
-        else:
-            st.info("⏳ Рекомендации: ожидание")
-        
-        # Статус для отчета
-        if st.session_state.report_generated:
-            st.success("✅ Отчет: готово")
-        else:
-            st.info("⏳ Отчет: ожидание")
+                    st.session_state.coefficients_data = None
+                    st.session_state.metrics_ready = False
+                    st.error(f"❌ Ошибка извлечения коэффициентов: {str(e)}")
+                    st.stop()
+
+        if st.session_state.run_recommendations and not st.session_state.recommendations:
+            with st.spinner("Генерируем рекомендации..."):
+                try:
+                    _file_bytes, parser_result, _json_str = _build_pdf_artifacts(primary_file)
+                    st.session_state.recommendations = get_recommendation(
+                        model_name="qwen3.5:9b",
+                        prompt=parser_result.get("text", ""),
+                        system_prompt="Ты профессиональный финансовый аналитик. Дай краткие и практические рекомендации по улучшению финансового состояния компании на основе данных из документа.",
+                        temperature=0.3,
+                    )
+                    st.success("✅ Рекомендации получены")
+                except Exception as e:
+                    st.session_state.recommendations = None
+                    st.error(f"❌ Ошибка генерации рекомендаций: {str(e)}")
+                    st.stop()
+
+        if st.session_state.run_report and not st.session_state.report_generated:
+            if not st.session_state.coefficients_data:
+                st.warning("⚠️ Для отчета сначала нужны коэффициенты")
+                st.stop()
+            if not st.session_state.recommendations:
+                st.warning("⚠️ Для отчета сначала получите рекомендации")
+                st.stop()
+            st.session_state.report_generated = True
+            st.success("✅ Отчет готов к формированию")
 
 # Основной контент - три вкладки для отображения результатов
 st.title("📄 Система анализа документов")
@@ -272,16 +276,8 @@ with tab1:
             for w in warnings:
                 st.markdown(f"- {w}")
         
-        # Визуализация коэффициентов
-        fig = px.bar(
-            x=list(st.session_state.coefficients_data['coefficients'].keys()),
-            y=list(st.session_state.coefficients_data['coefficients'].values()),
-            title="Значения коэффициентов",
-            labels={'x': 'Коэффициенты', 'y': 'Значение'}
-        )
-        st.plotly_chart(fig, use_container_width=True)
     elif st.session_state.documents and not st.session_state.processing_started:
-        st.info("ℹ️ Нажмите кнопку 'Запустить анализ' в боковой панели для расчета коэффициентов")
+        st.info("ℹ️ Отметьте модуль 'Вытаскивание коэфов и подсчет метрик' в боковой панели")
     elif not st.session_state.documents:
         st.info("ℹ️ Загрузите PDF документ в боковой панели")
 
@@ -308,7 +304,7 @@ with tab2:
                         with col2:
                             st.markdown(f"**Норма:** {rec.get('норма', 'N/A')}")
     elif st.session_state.documents and not st.session_state.processing_started:
-        st.info("ℹ️ Нажмите кнопку 'Запустить анализ' в боковой панели для генерации рекомендаций")
+        st.info("ℹ️ Отметьте модуль 'Выдача рекомендаций' в боковой панели")
     elif not st.session_state.documents:
         st.info("ℹ️ Загрузите PDF документ в боковой панели")
 
@@ -322,41 +318,193 @@ with tab3:
         with col1:
             st.subheader("Настройки")
             
-            report_type = st.selectbox(
-                "Тип отчета",
-                ["Краткий отчет", "Полный отчет", "Аналитическая записка"]
-            )
-            
-            include_charts = st.checkbox("Включить графики", value=True)
             include_recommendations = st.checkbox("Включить рекомендации", value=True)
             
             st.markdown("### Экспорт")
-            if st.button("📄 Экспорт в PDF", use_container_width=True):
-                st.success("PDF отчет сгенерирован (демо-режим)")
+            try:
+                # Проверяем, что все необходимые данные есть в session_state
+                if not hasattr(st.session_state, 'coefficients_data'):
+                    st.error("❌ Данные для отчета отсутствуют")
+                else:
+                    # Получаем данные
+                    data = st.session_state.coefficients_data
+                    
+                    # Подготавливаем данные для PDF
+                    # Создаем копию данных, чтобы не изменять оригинал
+                    pdf_payload = data.copy() if isinstance(data, dict) else {}
+                    
+                    # Добавляем рекомендации из st.session_state.recommendations
+                    if include_recommendations:
+                        recommendations_text = None
+                        
+                        # Берем рекомендации из st.session_state.recommendations
+                        if hasattr(st.session_state, 'recommendations') and st.session_state.recommendations:
+                            recs = st.session_state.recommendations
+                            
+                            # Если рекомендации в виде строки (от Ollama)
+                            if isinstance(recs, str):
+                                recommendations_text = recs
+                            # Если список словарей (старый формат)
+                            elif isinstance(recs, list):
+                                if recs and isinstance(recs[0], dict):
+                                    # Формируем текст из структурированных данных
+                                    rec_lines = []
+                                    for i, rec in enumerate(recs, 1):
+                                        param = rec.get('параметр', f'Рекомендация {i}')
+                                        recommendation = rec.get('рекомендация', '')
+                                        value = rec.get('значение', '')
+                                        norm = rec.get('норма', '')
+                                        
+                                        rec_lines.append(f"{i}. {param}")
+                                        rec_lines.append(f"   Рекомендация: {recommendation}")
+                                        if value:
+                                            rec_lines.append(f"   Текущее значение: {value}")
+                                        if norm:
+                                            rec_lines.append(f"   Норма: {norm}")
+                                        rec_lines.append("")
+                                    
+                                    recommendations_text = "\n".join(rec_lines)
+                                else:
+                                    # Простой список строк
+                                    recommendations_text = "\n".join(str(r) for r in recs)
+                        
+                        pdf_payload['recommendations'] = recommendations_text
+                    else:
+                        pdf_payload['recommendations'] = None
+                    
+                    # Генерируем PDF
+                    pdf_bytes = build_pdf_from_session_payload(pdf_payload)
+                    
+                    st.download_button(
+                        "📄 Скачать PDF отчет",
+                        data=pdf_bytes,
+                        file_name=f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                        mime="application/pdf",
+                        use_container_width=True,
+                    )
+                    
+                    st.success("✅ PDF отчет готов к скачиванию")
+                    
+            except Exception as e:
+                st.error(f"❌ Экспорт PDF недоступен: {str(e)}")
+                with st.expander("Показать детали ошибки"):
+                    st.exception(e)
         
         with col2:
             st.subheader("Предварительный просмотр")
             
             with st.container(border=True):
-                st.markdown("### Отчет по анализу документа")
-                if st.session_state.coefficients_data:
-                    st.markdown(f"**Документ:** {st.session_state.coefficients_data['file_name']}")
-                    st.markdown(f"**Дата анализа:** {st.session_state.coefficients_data['date']}")
+                # Получаем данные из session_state
+                data = st.session_state.coefficients_data
                 
-                if st.session_state.coefficients_data:
-                    st.markdown("#### Коэффициенты")
-                    for name, value in st.session_state.coefficients_data['coefficients'].items():
-                        st.markdown(f"- **{name}:** {value}")
+                # Заголовок (как в PDF)
+                st.markdown("### Финансовый отчёт (автоанализ)")
+                st.markdown(f"**Файл:** {data.get('file_name', 'Не указан')}")
+                st.markdown(f"**Дата:** {data.get('date', datetime.now().strftime('%Y-%m-%d'))}")
+                st.markdown("---")
                 
-                if include_recommendations and st.session_state.recommendations:
-                    st.markdown("#### Рекомендации")
-                    if isinstance(st.session_state.recommendations, str):
-                        st.markdown(st.session_state.recommendations)
+                # Предупреждения (как в PDF)
+                warnings = data.get('warnings', [])
+                if warnings:
+                    st.markdown("#### ⚠️ Предупреждения")
+                    for warning in warnings:
+                        st.markdown(f"• {warning}")
+                    st.markdown("---")
+                
+                # Таблица метрик (как в PDF)
+                metrics = data.get('metrics_detailed', [])
+                if metrics:
+                    st.markdown("#### 📊 Метрики и коэффициенты")
+                    
+                    # Создаем таблицу в стиле PDF
+                    table_data = []
+                    for m in metrics:
+                        if isinstance(m, dict):
+                            # Получаем статус эмодзи
+                            status = m.get('status', 'unknown')
+                            em = status_emoji(status)
+                            table_data.append([
+                                em,
+                                m.get('title', ''),
+                                m.get('display', ''),
+                                m.get('formula', '')
+                            ])
+                        else:
+                            # Если это объект MetricResult
+                            table_data.append([
+                                status_emoji(m.status),
+                                m.title,
+                                m.display,
+                                m.formula
+                            ])
+                    
+                    # Отображаем таблицу в Streamlit
+                    df = pd.DataFrame(
+                        table_data,
+                        columns=["Статус", "Показатель", "Значение", "Формула"]
+                    )
+                    st.dataframe(
+                        df,
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "Статус": st.column_config.TextColumn(width="small"),
+                            "Показатель": st.column_config.TextColumn(width="medium"),
+                            "Значение": st.column_config.TextColumn(width="small"),
+                            "Формула": st.column_config.TextColumn(width="large"),
+                        }
+                    )
+                    st.markdown("---")
+                
+                # Рекомендации (как в PDF) - используем st.session_state.recommendations
+                if include_recommendations:
+                    # Получаем рекомендации из правильного места
+                    recommendations_data = None
+                    
+                    # Сначала из st.session_state.recommendations
+                    if hasattr(st.session_state, 'recommendations') and st.session_state.recommendations:
+                        recommendations_data = st.session_state.recommendations
                     else:
-                        for rec in st.session_state.recommendations:
-                            st.markdown(f"- {rec['рекомендация']}")
+                        # Если нет, пробуем из coefficients_data
+                        recommendations_data = data.get('recommendations')
+                    
+                    if recommendations_data:
+                        st.markdown("#### 💡 Рекомендации")
+                        
+                        # Если рекомендации в виде строки
+                        if isinstance(recommendations_data, str):
+                            # Разбиваем на строки, как в PDF
+                            for line in recommendations_data.split('\n'):
+                                if line.strip():
+                                    st.markdown(line.strip())
+                        
+                        # Если рекомендации в виде списка словарей (старый формат)
+                        elif isinstance(recommendations_data, list):
+                            for i, rec in enumerate(recommendations_data, 1):
+                                if isinstance(rec, dict):
+                                    st.markdown(f"**{i}. {rec.get('параметр', 'Рекомендация')}**")
+                                    st.markdown(f"*Рекомендация:* {rec.get('рекомендация', '')}")
+                                    
+                                    col1, col2 = st.columns(2)
+                                    with col1:
+                                        if rec.get('значение'):
+                                            st.markdown(f"*Текущее значение:* {rec.get('значение')}")
+                                    with col2:
+                                        if rec.get('норма'):
+                                            st.markdown(f"*Норма:* {rec.get('норма')}")
+                                    st.markdown("---")
+                                else:
+                                    st.markdown(f"• {rec}")
+                        
+                        # Если просто текст
+                        else:
+                            st.markdown(str(recommendations_data))
+                    else:
+                        if include_recommendations:
+                            st.info("ℹ️ Рекомендации не сгенерированы. Убедитесь, что модуль 'Выдача рекомендаций' активирован.")
+                
     elif st.session_state.documents and not st.session_state.processing_started:
-        st.info("ℹ️ Нажмите кнопку 'Запустить анализ' в боковой панели для формирования отчета")
+        st.info("ℹ️ Отметьте модули в боковой панели для формирования отчета")
     elif not st.session_state.documents:
         st.info("ℹ️ Загрузите PDF документ в боковой панели")
 
@@ -365,11 +513,13 @@ with st.sidebar:
     st.divider()
     if st.button("🔄 Сбросить все данные", use_container_width=True):
         for key in ['documents', 'processing_started', 'coefficients_data', 
-                   'recommendations', 'report_generated']:
+                   'recommendations', 'report_generated', 'metrics_ready',
+                   'run_coeffs_metrics', 'run_recommendations', 'run_report']:
             if key in st.session_state:
                 if key == 'documents':
                     st.session_state[key] = []
-                elif key == 'processing_started':
+                elif key in ['processing_started', 'metrics_ready',
+                             'run_coeffs_metrics', 'run_recommendations', 'run_report']:
                     st.session_state[key] = False
                 else:
                     st.session_state[key] = None
