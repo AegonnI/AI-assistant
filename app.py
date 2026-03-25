@@ -5,7 +5,7 @@ import tempfile
 import io
 from datetime import datetime
 from pathlib import Path
-from recommendation_module.recommendation_module import get_recommendation
+from recommendation_module.recommendation_module import get_recommendation, get_available_ollama_models
 from financial_pipeline import run_pipeline_on_uploaded_pdf
 from api_ai.ModelProvider import extract_coeffs
 from pdf_parser_module.main_pdf_parser1 import extract_pdf_simple
@@ -48,6 +48,12 @@ if "run_recommendations" not in st.session_state:
     st.session_state.run_recommendations = False
 if "run_report" not in st.session_state:
     st.session_state.run_report = False
+if "recommendations_model_name" not in st.session_state:
+    st.session_state.recommendations_model_name = "ministral-3:8b"
+if "ollama_models" not in st.session_state:
+    st.session_state.ollama_models = []
+if "ollama_models_loaded" not in st.session_state:
+    st.session_state.ollama_models_loaded = False
 
 
 def _save_uploaded_pdf_to_temp(file_name: str, file_bytes: bytes) -> tuple[str, str]:
@@ -146,6 +152,42 @@ with st.sidebar:
             value=st.session_state.coeff_list_text,
             help="Список имен коэффициентов, которые нужно извлечь из PDF.",
         )
+
+    # Настройки модели для генерации рекомендаций (Ollama)
+    st.divider()
+    st.markdown("### 💡 Настройки модели для рекомендаций (Ollama)")
+
+    # Автопопытка загрузить список моделей при первом запуске
+    if not st.session_state.ollama_models_loaded:
+        try:
+            st.session_state.ollama_models = get_available_ollama_models()
+        except Exception:
+            st.session_state.ollama_models = []
+        finally:
+            st.session_state.ollama_models_loaded = True
+
+    if st.button("🔄 Поиск доступных моделей Ollama", use_container_width=True):
+        with st.spinner("Получаем список моделей из Ollama..."):
+            try:
+                st.session_state.ollama_models = get_available_ollama_models()
+                st.success(f"✅ Найдено моделей: {len(st.session_state.ollama_models)}")
+            except Exception as e:
+                st.session_state.ollama_models = []
+                st.warning(str(e))
+
+    if st.session_state.ollama_models:
+        desired = st.session_state.recommendations_model_name
+        initial_index = st.session_state.ollama_models.index(desired) if desired in st.session_state.ollama_models else 0
+        st.session_state.recommendations_model_name = st.selectbox(
+            "Модель Ollama",
+            st.session_state.ollama_models,
+            index=initial_index,
+        )
+    else:
+        st.session_state.recommendations_model_name = st.text_input(
+            "Модель Ollama (введите вручную, если список не загрузился)",
+            value=st.session_state.recommendations_model_name,
+        )
     
     st.markdown("### Запуск модулей")
     st.session_state.run_coeffs_metrics = st.checkbox(
@@ -170,7 +212,10 @@ with st.sidebar:
             with st.spinner("Извлекаем коэффициенты..."):
                 try:
                     file_bytes, _parser_result, json_str = _build_pdf_artifacts(primary_file)
-                    if st.session_state.coeff_source == "Через API (extract_coeffs)":
+                    # Кэшируем результат парсинга, чтобы не запускать повторно тяжелый экстрактор
+                    st.session_state.parser_result = _parser_result
+
+                    if st.session_state.coeff_source == "Через API":
                         coeff_list = _parse_coeff_list(st.session_state.coeff_list_text)
                         if not coeff_list:
                             st.error("⚠️ Укажите хотя бы один коэффициент/показатель для извлечения.")
@@ -196,9 +241,12 @@ with st.sidebar:
                             "parse_meta": {},
                         }
                     else:
+                        # Попытка использовать уже закэшированный результат парсинга
+                        parser_result_cached = st.session_state.get('parser_result')
                         st.session_state.coefficients_data = run_pipeline_on_uploaded_pdf(
                             file_bytes=file_bytes,
                             file_name=primary_file.name,
+                            parser_result=parser_result_cached,
                         )
                     st.session_state.metrics_ready = True
                     st.success("✅ Коэффициенты извлечены и метрики посчитаны")
@@ -211,9 +259,14 @@ with st.sidebar:
         if st.session_state.run_recommendations and not st.session_state.recommendations:
             with st.spinner("Генерируем рекомендации..."):
                 try:
-                    _file_bytes, parser_result, _json_str = _build_pdf_artifacts(primary_file)
+                    # Пытаемся использовать уже закэшированный parser_result
+                    parser_result = st.session_state.get('parser_result')
+                    if not parser_result:
+                        _file_bytes, parser_result, _json_str = _build_pdf_artifacts(primary_file)
+                        st.session_state.parser_result = parser_result
+
                     st.session_state.recommendations = get_recommendation(
-                        model_name="qwen3.5:9b",
+                        model_name=st.session_state.recommendations_model_name,
                         prompt=parser_result.get("text", ""),
                         system_prompt="Ты профессиональный финансовый аналитик. Дай краткие и практические рекомендации по улучшению финансового состояния компании на основе данных из документа.",
                         temperature=0.3,
@@ -394,6 +447,16 @@ with tab3:
             st.subheader("Предварительный просмотр")
             
             with st.container(border=True):
+                # ✅ ДОБАВЬТЕ ЭТОТ БЛОК ДЛЯ ОТОБРАЖЕНИЯ ИЗОБРАЖЕНИЯ
+                # Загрузка и отображение изображения
+                try:
+                    image_path = "report_chart.png"  
+                    if Path(image_path).exists():
+                        st.image(image_path, use_container_width=True)
+                        st.markdown("---")
+                except Exception as e:
+                    st.warning(f"Не удалось загрузить изображение: {e}")
+                # КОНЕЦ БЛОКА ДОБАВЛЕНИЯ
                 # Получаем данные из session_state
                 data = st.session_state.coefficients_data
                 
@@ -413,9 +476,33 @@ with tab3:
                 
                 # Таблица метрик (как в PDF)
                 metrics = data.get('metrics_detailed', [])
+
+                # Гарантируем, что первой строкой будет Баланс (если он отсутствует)
+                def _ensure_balance_first(metrics_list: list) -> list:
+                    if not metrics_list:
+                        return metrics_list
+                    # Ищем по ключу/названию
+                    for item in metrics_list:
+                        title = item.get('title', '') if isinstance(item, dict) else getattr(item, 'title', '')
+                        key = item.get('key', '') if isinstance(item, dict) else getattr(item, 'key', '')
+                        if (key and 'balance' in str(key).lower()) or ('баланс' in str(title).lower()):
+                            return metrics_list
+                    # Вставляем заглушку Баланс в начало
+                    balance_item = {
+                        'key': 'balance',
+                        'title': 'Баланс',
+                        'formula': 'активы = пасивы',
+                        'display': '' ,
+                        'status': 'ok'
+                    }
+                    metrics_list.insert(0, balance_item)
+                    return metrics_list
+
+                metrics = _ensure_balance_first(metrics)
+
                 if metrics:
                     st.markdown("#### 📊 Метрики и коэффициенты")
-                    
+
                     # Создаем таблицу в стиле PDF
                     table_data = []
                     for m in metrics:
@@ -437,7 +524,7 @@ with tab3:
                                 m.display,
                                 m.formula
                             ])
-                    
+
                     # Отображаем таблицу в Streamlit
                     df = pd.DataFrame(
                         table_data,
