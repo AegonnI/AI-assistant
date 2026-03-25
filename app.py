@@ -447,16 +447,6 @@ with tab3:
             st.subheader("Предварительный просмотр")
             
             with st.container(border=True):
-                # ✅ ДОБАВЬТЕ ЭТОТ БЛОК ДЛЯ ОТОБРАЖЕНИЯ ИЗОБРАЖЕНИЯ
-                # Загрузка и отображение изображения
-                try:
-                    image_path = "report_chart.png"  
-                    if Path(image_path).exists():
-                        st.image(image_path, use_container_width=True)
-                        st.markdown("---")
-                except Exception as e:
-                    st.warning(f"Не удалось загрузить изображение: {e}")
-                # КОНЕЦ БЛОКА ДОБАВЛЕНИЯ
                 # Получаем данные из session_state
                 data = st.session_state.coefficients_data
                 
