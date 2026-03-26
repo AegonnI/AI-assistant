@@ -1,114 +1,117 @@
-## Aegon AI Assistant (financial document analyzer)
+﻿# Aegon AI Assistant (financial document analyzer)
 
 Streamlit-приложение для анализа финансовых PDF-документов:
-- извлечение текста из PDF,
+
+- извлечение текста и таблиц из PDF,
 - извлечение финансовых показателей (локальный пайплайн или через LLM API),
-- расчёт финансовых метрик и статусов (`ok / warn / risk`),
+- расчёт метрик и статусов (ok / warn / risk),
 - генерация рекомендаций через Ollama,
 - формирование PDF-отчёта для скачивания.
 
+---
+
 ## Как это работает (сквозной сценарий)
-1. Вы загружаете PDF-файл(ы) в UI.
-2. Из первого PDF строятся артефакты парсинга (текст + JSON) во временной папке.
-3. Дальше запускаются отмеченные модули:
-   - **Коэффициенты и метрики**:
-     - *Локальный пайплайн*: извлекает числовые поля по ключевым словам и считает метрики.
-     - *Через API*: отправляет куски текста в выбранный LLM-провайдер и просит вернуть строго JSON.
-   - **Рекомендации**: отправляет текст документа в выбранную локальную Ollama-модель.
-   - **Отчёт**: собирает всё в PDF через `reportlab`.
+
+1. Загрузка PDF
+   - В боковой панели  загружаете один или несколько PDF.
+   - Первым файлом из списка считается основной .
+
+2. Формирование артефактов парсинга
+   - Файл сохраняется во временный каталог:
+     - `<TEMP>/ai_assistant_streamlit/input/` (файл)
+     - `output/` (текст и JSON)
+   - `extract_pdf_simple` из `pdf_parser_module/pdf_to_text_extractor_main.py` обрабатывает PDF.
+   - Результат содержит `plain_text`, `structured` и метаданные.
+
+3. Запуск модулей (через чекбоксы в боковой панели)
+
+### Коэффициенты и метрики
+
+- Локальный пайплайн:
+  - `financial_pipeline/financial_pipeline.py` + `financial_pipeline/financial_parser.py`.
+  - `parse_pdf_lines` ищет ключевые фразы по `KEYWORD_MAP` (выручка, чистая прибыль, активы и др.).
+  - `run_pipeline_on_uploaded_pdf` считает метрики (`compute_metrics`) и преобразует в `coefficients` + `metrics_detailed`.
+  - `parse_meta` фиксирует стратегию обработки:
+    - `structured` (из JSON `pages / structured`),
+    - `plain` (из `plain_text`),
+    - `direct` (через `parse_financial_pdf` по bytes).
+
+- Через API:
+  - `api_ai/ModelProvider.py` (функция `extract_coeffs`).
+  - Отправляет JSON-артефакт / текст в провайдера и получает строго JSON с ключами.
+  - Берёт первое ненулевое значение по каждому ключу среди чанков.
+
+### Рекомендации
+
+- `recommendation_module/recommendation_module.py`.
+- Формирует prompt на основе метрик, коэффициентов и предупреждений.
+- Отправляет запрос на Ollama (`http://localhost:11434`).
+- Ответ сохраняется в `st.session_state.recommendations`.
+
+### Отчёт
+
+- `report_pdf.py` генерирует PDF через reportlab.
+- В отчёт включаются:
+  - `metrics_detailed`,
+  - `warnings`,
+  - `recommendations` (опционально),
+  - метаданные и заголовок.
+- Кнопка для скачивания: `report_YYYYMMDD_HHMMSS.pdf`.
+
+---
 
 ## Основные возможности
-- PDF -> текст: извлечение через `pypdf` (основной вариант) с fallback на `pdfplumber`.
-- Локальные метрики: расчёт показателей на основе извлечённых фактов и простых порогов статуса.
-- Метрики/коэффициенты для UI и отчёта:
-  - `metrics_detailed` — подробная структура метрик (название, формула, отображаемое значение, статус).
-  - `coefficients` — плоский словарь для таблицы коэффициентов.
-- Рекомендации: генерация ответа через HTTP API Ollama (`/api/generate`), без стриминга.
-- PDF-отчёт: таблица метрик, предупреждения (если есть) и блок с рекомендациями (опционально).
 
-## Запуск
-1. Установите зависимости (минимальный набор по импортам `app.py` и подключенным модулям):
-   - `streamlit`
-   - `pandas`
-   - `plotly`
-   - `requests`
-   - `pdfplumber`
-   - `pypdf` (нужно для основного пути извлечения текста из PDF; fallback на `pdfplumber` тоже используется)
-   - `reportlab`
-   - **для API-режима (опционально, в зависимости от провайдера)**:
-     - `groq` (если выбран провайдер `Groq`)
-     - `google-generativeai` (если выбран провайдер `google`)
-2. Запустите приложение:
-   - `streamlit run app.py`
+- PDF → текст:
+  - `pdf_to_text_extractor_main.py` (Surya OCR / PyMuPDF / pdfplumber),
+  - `extract_lines_from_pdf` из pdfplumber для резерва.
+- Метрики:
+  - `financial_pipeline/coefficients_module.py` (ros, roa, roe, liquidity, leverage, dso, capex/revenue и др.).
+  - Статусы `ok`, `warn`, `risk`.
+- Отчёт: PDF с таблицей метрик и рекомендациями.
 
-## Требования для Ollama (рекомендации)
-Приложение обращается к Ollama по адресу:
-`http://localhost:11434`
+---
 
-Чтобы работало:
-- Ollama должен быть запущен,
-- нужная модель должна быть доступна в Ollama (кнопка “Поиск доступных моделей Ollama”).
+## Установка и запуск
 
-## Использование (в UI)
-### 1) Загрузка PDF
-В боковой панели:
-- загрузите один или несколько `*.pdf`,
-- приложение использует **первый** загруженный PDF как “основной” для запуска модулей.
+```bash
+pip install -r requirements_finance_modules.txt
+#Также рекомндуется использовать пайторч именно с кудой
+# при необходимости:
+# pip install -r api_ai\requirements.txt
+```
 
-### 2) Коэффициенты и метрики
-В разделе **“Источник коэффициентов”** выберите один из вариантов:
+Запуск:
 
-**A. “Локальный пайплайн”**
-- PDF разбирается, числовые поля извлекаются по ключевым словам (например: `выручка`, `чистая прибыль`, `итого активы`, `собственный капитал` и др.).
-- Затем считаются метрики и статусы.
+```bash
+streamlit run app.py
+```
 
-**B. “Через API”**
-- Выберите провайдера: `Groq`, `google`, `openrouter`
-- Укажите:
-  - `API key`
-  - `Модель`
-  - список коэффициентов/показателей (через запятую)
-- Приложение:
-  - дробит текст документа на чанки,
-  - отправляет в модель извлеченный контент (в текущей реализации это содержимое JSON-артефакта парсинга PDF),
-  - просит вернуть **строго JSON** с ключами из вашего списка,
-  - берёт первое ненулевое значение по каждому ключу среди чанков.
+---
 
-### 3) Рекомендации
-- Включите чекбокс **“Выдача рекомендаций”**.
-- Выберите модель Ollama (или введите вручную).
-- При запуске приложение формирует prompt из текста документа и запрашивает ответ по HTTP.
+## Требования Ollama
 
-### 4) Генерация отчёта
-- Включите **“Генерация отчета”**.
-- При необходимости включите/выключите “Включить рекомендации”.
-- После подготовки будет доступна кнопка скачивания PDF:
-  - `report_YYYYMMDD_HHMMSS.pdf`
+- Ollama должен быть запущен.
+- Модель должна быть доступна в Ollama.
+- По умолчанию адрес: `http://localhost:11434`.
 
-## Что считается “метриками”
-В локальном пайплайне метрики рассчитываются из `FinancialFacts`, а затем преобразуются в структурированный формат:
-- `ros`, `net_margin`, `roa`, `roe`
-- `current_ratio`, `quick_ratio`, `cash_ratio`
-- `autonomy`, `leverage`
-- `dso`, `asset_turnover`
-- `capex_revenue`
+---
 
-Статус метрики (`ok / warn / risk`) выбирается по упрощённым порогам в `financial_pipeline/coefficients_module.py`.
+## Структура проекта
+
+- `app.py` — Streamlit UI + логика модуля.
+- `pdf_parser_module/pdf_to_text_extractor_main.py` — извлечение текста, structured output + совместимость с `app.py`.
+- `financial_pipeline/financial_parser.py` — парсинг чисел + годовые колонки.
+- `financial_pipeline/financial_pipeline.py` — подсчет метрик и pipeline.
+- `financial_pipeline/financial_transform.py` — нормализация и предупреждения.
+- `financial_pipeline/coefficients_module.py` — формулы, статус метрик.
+- `api_ai/ModelProvider.py` — API-режим для извлечения коэффициентов.
+- `recommendation_module/recommendation_module.py` — Ollama-рекомендации.
+- `report_pdf.py` — генерация PDF-отчёта.
+
+---
 
 ## Временные артефакты
-Во время обработки загруженных PDF приложение складывает промежуточные файлы в папку:
-`<TEMP>/ai_assistant_streamlit/`
-- `input/` — копия загруженного PDF
-- `output/` — текстовый и JSON артефакты парсинга
 
-## Структура проекта (по цепочке `app.py`)
-- `app.py` — интерфейс Streamlit и оркестрация модулей
-- `pdf_parser_module/main_pdf_parser1.py` + `pdf_parser_module/main_pdf_parser.py` — извлечение текста из PDF и создание JSON артефактов
-- `financial_pipeline/financial_pipeline.py` — расчёт метрик на основе извлечённых фактов
-- `financial_pipeline/financial_parser.py` — извлечение чисел по ключевым словам из строк PDF
-- `financial_pipeline/financial_transform.py` — нормализация извлечённых полей и сбор предупреждений
-- `financial_pipeline/coefficients_module.py` — расчёт метрик и статусов
-- `api_ai/ModelProvider.py` — LLM API для извлечения коэффициентов (JSON-ответ)
-- `recommendation_module/recommendation_module.py` — рекомендации через Ollama
-- `report_pdf.py` — генерация PDF-отчёта через `reportlab`
-
+- `<TEMP>/ai_assistant_streamlit/input/` — входные файлы.
+- `<TEMP>/ai_assistant_streamlit/output/` — артефакты парсинга (txt, json).

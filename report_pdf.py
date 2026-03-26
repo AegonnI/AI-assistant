@@ -126,13 +126,13 @@ def build_pdf_from_session_payload(payload: Dict[str, Any]) -> bytes:
         for d in metrics:
             mlist.append(
                 MetricResult(
-                    key=d["key"],
-                    title=d["title"],
-                    formula=d["formula"],
+                    key=d.get("key", ""),
+                    title=d.get("title", ""),
+                    formula=d.get("formula", ""),
                     value=d.get("value"),
-                    display=d["display"],
-                    unit=d["unit"],
-                    status=MetricStatus(d["status"]),
+                    display=d.get("display", ""),
+                    unit=d.get("unit", ""),
+                    status=MetricStatus(d.get("status", "unknown")),
                     hint=d.get("hint", ""),
                 )
             )
