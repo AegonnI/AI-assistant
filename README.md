@@ -1,4 +1,4 @@
-﻿# Aegon AI Assistant (financial document analyzer)
+﻿# AI Assistant (financial document analyzer)
 
 Streamlit-приложение для анализа финансовых PDF-документов:
 
